@@ -1,0 +1,22 @@
+[
+  {
+    "model": "cond",
+    "van_physL2": 0.905,
+    "pcfm_physL2": 0.0834,
+    "van_valid": 0.0,
+    "pcfm_valid": 72.2,
+    "van_nrmse": NaN,
+    "pcfm_nrmse": NaN,
+    "pcfm_nrmse_best": 139.54
+  },
+  {
+    "model": "uncond",
+    "van_physL2": 0.9168,
+    "pcfm_physL2": 0.0912,
+    "van_valid": 0.0,
+    "pcfm_valid": 63.1,
+    "van_nrmse": NaN,
+    "pcfm_nrmse": NaN,
+    "pcfm_nrmse_best": 140.92
+  }
+]

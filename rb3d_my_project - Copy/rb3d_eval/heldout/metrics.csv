@@ -1,0 +1,3 @@
+model,van_physL2,pcfm_physL2,van_valid%,pcfm_valid%,distinct_valid_planforms
+cond,0.9096,0.1236,0.0,45.0,7
+uncond,0.9177,0.1513,0.0,22.3,5

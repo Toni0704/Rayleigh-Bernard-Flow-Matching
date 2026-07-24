@@ -1,0 +1,51 @@
+{
+  "n_samples": 192,
+  "purity_min": 0.9,
+  "ref_residual_level": 0.09075959026813507,
+  "train_modes": [
+    [
+      "roll",
+      2,
+      0
+    ],
+    [
+      "roll",
+      3,
+      0
+    ],
+    [
+      "roll",
+      0,
+      3
+    ],
+    [
+      "roll",
+      0,
+      2
+    ],
+    [
+      "roll",
+      4,
+      0
+    ]
+  ],
+  "n_pass_gates_1_4": 0,
+  "n_confirmed": 0,
+  "label_histogram": {
+    "('mixed', 2, 4)": 10,
+    "('roll', 0, 3)": 20,
+    "('roll', 3, 0)": 35,
+    "('roll', 4, 0)": 16,
+    "('unknown', 0, 0)": 39,
+    "('roll', 0, 2)": 20,
+    "('roll', 2, 0)": 34,
+    "('mixed', 2, 6)": 3,
+    "('rect', 2, 3)": 3,
+    "('square', 2, 2)": 4,
+    "('mixed', 4, 6)": 5,
+    "('mixed', 2, 3)": 2,
+    "('rect', 3, 2)": 1
+  },
+  "mean_proj_displacement": 0.6151401996612549,
+  "confirmed": []
+}

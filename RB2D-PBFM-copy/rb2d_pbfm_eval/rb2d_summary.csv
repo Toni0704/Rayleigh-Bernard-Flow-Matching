@@ -1,0 +1,2 @@
+model,sampling,path,valid_pct,mean_resid,resid_over_floor,mode_coverage,roll_entropy,sec_per_sample,sec_per_sample_ode,rho_median,coverage_pooled,nrmse_valid,nrmse_all
+cond,PBFM,pure,6.25,1.436208502948284,11.02547866993419,0.16666666666666666,0.8918673953172509,3.196735533008344,3.1962057383750184,1.4313001036643982,0.6,8.986447689433893,45.096122267811246

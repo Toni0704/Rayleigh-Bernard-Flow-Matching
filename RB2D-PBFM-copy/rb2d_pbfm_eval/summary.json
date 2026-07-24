@@ -1,0 +1,18 @@
+[
+  {
+    "model": "cond",
+    "sampling": "PBFM",
+    "path": "pure",
+    "valid_pct": 6.25,
+    "mean_resid": 1.436208502948284,
+    "resid_over_floor": 11.02547866993419,
+    "mode_coverage": 0.16666666666666666,
+    "roll_entropy": 0.8918673953172509,
+    "sec_per_sample": 3.196735533008344,
+    "sec_per_sample_ode": 3.1962057383750184,
+    "rho_median": 1.4313001036643982,
+    "coverage_pooled": 0.6,
+    "nrmse_valid": 8.986447689433893,
+    "nrmse_all": 45.096122267811246
+  }
+]

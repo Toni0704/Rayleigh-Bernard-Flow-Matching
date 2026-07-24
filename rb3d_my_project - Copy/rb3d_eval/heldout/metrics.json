@@ -1,0 +1,18 @@
+[
+  {
+    "model": "cond",
+    "van_physL2": 0.9096,
+    "pcfm_physL2": 0.1236,
+    "van_valid": 0.0,
+    "pcfm_valid": 45.0,
+    "distinct_valid": 7
+  },
+  {
+    "model": "uncond",
+    "van_physL2": 0.9177,
+    "pcfm_physL2": 0.1513,
+    "van_valid": 0.0,
+    "pcfm_valid": 22.3,
+    "distinct_valid": 5
+  }
+]
