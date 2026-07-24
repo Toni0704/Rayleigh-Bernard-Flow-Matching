@@ -423,7 +423,23 @@ def train_pbfm_3d(data, cfg, cond, device, ckpt_path, eval_every=500,
             _, x1p = unroll_predict(model, x_t, t, cond_arg, n_unroll,
                                     backprop=cfg['backprop'])
             loss_res, res_val = resid_loss_fn(x1p, ra, pr, t)
-            if not torch.isfinite(loss_res):
+            # Finiteness must be a GLOBAL, all-ranks-agree decision: each rank
+            # draws a different random batch, so it's entirely possible for
+            # rank 0's residual to be finite while rank 1's (different batch)
+            # is NaN/Inf at the SAME iteration. If ranks branched on their own
+            # local finiteness they'd call a DIFFERENT NUMBER of all_reduce()s
+            # this step (1 in the skip-physics path vs 2 in the ConFIG path),
+            # which permanently desyncs NCCL -- not a crash, a silent hang
+            # (this is what produced the 10-minute ALLREDUCE watchdog timeout
+            # right at the iteration physics first turned on).
+            finite = torch.isfinite(loss_res)
+            if world_size > 1:
+                ft = finite.float().view(1)
+                ddp_allreduce_mean_(ft)          # 1.0 iff EVERY rank was finite
+                finite = ft.item() > 0.999
+            else:
+                finite = bool(finite)
+            if not finite:
                 n_bad_res += 1
                 if main and n_bad_res in (1, 10, 100, 1000):
                     print(f'[train] non-finite residual at it={it} '
