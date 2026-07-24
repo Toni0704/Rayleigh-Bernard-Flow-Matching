@@ -143,7 +143,7 @@ def sanity_sample(ckpt, data, device):
           f'{diag["seconds"]:.1f}s for 5 samples (plain ODE, no projection)')
 
 
-def worker(rank, world_size, args):
+def worker(rank, world_size, args, data=None):
     device = C.ddp_setup(rank, world_size, backend=args.backend, port=args.port)
     main = C.is_main(rank)
     if main:
@@ -170,8 +170,17 @@ def worker(rank, world_size, args):
             val_gen_samples=args.val_gen_samples, log_every=args.log_every,
             seed=args.seed, augment=args.augment, physics=args.physics)
 
-        data = C.RB3DData(args.bank, device=device, val_frac=cfg['val_frac'],
-                          seed=args.seed)
+        if data is None:
+            # torchrun path: each rank is an independently-launched OS process
+            # (no common parent to share memory from), so it must load its own
+            # copy. Under --gpus N (mp.spawn), main() below loads ONE copy and
+            # shares it here instead -- see main()'s comment for why that
+            # matters on a multi-GB bank.
+            data = C.RB3DData(args.bank, device=device, val_frac=cfg['val_frac'],
+                              seed=args.seed)
+        else:
+            data.device = device        # each rank targets its own GPU; the
+                                        # underlying field storage is shared
         out = args.out or ('/kaggle/working' if os.path.isdir('/kaggle/working')
                            else '.')
         os.makedirs(out, exist_ok=True)
@@ -195,7 +204,29 @@ def main():
     gpus = args.gpus
     if gpus is None:
         gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    C.launch(worker, gpus, args)
+    gpus = max(1, int(gpus))
+
+    # Load the (multi-GB) data bank ONCE and share its storage across every
+    # spawned rank via share_memory_(), instead of each rank independently
+    # torch.load-ing + densely re-copying the whole bank. RB3DData.__init__
+    # first loads the full raw bank dict, then copies it into a freshly
+    # allocated dense tensor while releasing entries -- so each rank
+    # transiently needs close to 2x the bank's on-disk size at the peak of
+    # that copy. Two ranks hitting that peak simultaneously under mp.spawn
+    # (an 8.6 GB bank -> ~15-17 GB/rank peak) is what SIGKILLed a 31 GB-RAM
+    # box here; sharing one copy keeps total RAM cost independent of GPU count.
+    # torchrun launches genuinely separate OS processes with no common parent
+    # to share memory from, so that path still loads independently per rank.
+    if C.ddp_is_torchrun():
+        data = None
+    else:
+        data = C.RB3DData(args.bank, device='cpu', val_frac=args.val_frac,
+                          seed=args.seed)
+        data.fields.share_memory_()
+        data.params.share_memory_()
+        data.Ra.share_memory_()
+        data.Pr.share_memory_()
+    C.launch(worker, gpus, args, data)
 
 
 if __name__ == '__main__':
