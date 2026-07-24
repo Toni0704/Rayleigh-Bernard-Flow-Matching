@@ -533,7 +533,8 @@ def train_pbfm_3d(data, cfg, cond, device, ckpt_path, eval_every=500,
                 history['val'].append((it, val, val_res, val_gen))
                 vr = f' val_res={val_res:.4e}' if val_res == val_res else ''
                 vg = f' val_gen_res={val_gen:.4e}' if val_gen == val_gen else ''
-                print(f'[train]   val(ema fm)={val:.4e} (best fm {best:.4e})'
+                print(f'[train]   val(ema fm)={val:.4e} '
+                      f'(best {cfg["early_stop_metric"]} {best:.4e})'
                       f'{vr}{vg}  [{cnt} fixed fields]', flush=True)
 
                 metric = val_gen if (cfg['early_stop_metric'] == 'gen_res'
