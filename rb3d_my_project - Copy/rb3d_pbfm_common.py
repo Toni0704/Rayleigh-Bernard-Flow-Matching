@@ -202,7 +202,7 @@ def default_cfg_pbfm():
         unroll=2, unroll_start=None, curriculum_end=None, backprop='last',
         resid_p=1.0, use_config=True, resid_weight=1.0, warmup_iters=1000,
         grad_clip=1.0, physics=True,
-        early_stop_metric='gen_res',        # 'fm' or 'gen_res'
+        early_stop_metric='fm',             # 'fm' (2-D default) or 'gen_res'
         val_gen_samples=8, val_gen_steps=25, val_resid_samples=16,
         val_every=500, patience=8,
     )
@@ -478,7 +478,21 @@ def train_pbfm_3d(data, cfg, cond, device, ckpt_path, eval_every=500,
         torch.nn.utils.clip_grad_norm_(params, cfg['grad_clip'])
         opt.step()
         sched.step()
-        ema.update(model)
+        # Bias-corrected EMA ramp (matches rb2d_pbfm_common.py): a FIXED decay
+        # from step 0 keeps 0.999^1000 ~= 37% of the random init blended into
+        # the "best" checkpoint right as physics turns on at warmup_iters=1000
+        # -- exactly the window where a diverging live model can still look
+        # deceptively good under a stale EMA. Ramping the decay in makes the
+        # EMA track the live model from the start and converge to cfg['ema']
+        # later, so "best" reflects what the model is actually doing.
+        d = min(cfg['ema'], (1.0 + it) / (10.0 + it))
+        with torch.no_grad():
+            for k, pm in model.state_dict().items():
+                pe = ema.shadow[k]
+                if pe.dtype.is_floating_point:
+                    pe.mul_(d).add_(pm.detach(), alpha=1 - d)
+                else:
+                    ema.shadow[k] = pm.detach().clone()
 
         if (it % cfg.get('log_every', 100) == 0 or it == cfg['iters'] - 1) and main:
             history['it'].append(it)

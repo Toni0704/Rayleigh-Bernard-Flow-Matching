@@ -13,11 +13,27 @@ revisit any of these anytime by editing this file):
 - Sampling: headline = plain ODE, no relaxation. Keep `RB3DRelaxer` as an
   opt-in `--project` ablation; add a single non-iterative `leray_project`
   cleanup as `--hard-cleanup`.
-- Batch/hidden: start from PCFM's `batch=12, hidden=32`, size down/up
-  empirically once step time is measured on both T4s.
+- Batch/hidden: start from PCFM's `batch=12, hidden=32`; in practice OOM'd at
+  batch=12 (6/GPU) once physics loss turned on (ConFIG's two separate backward
+  passes briefly hold both loss graphs at once) — running at **batch=6** (3/GPU)
+  with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
 - Hyperparameters: carry over 2-D PBFM's defaults (AdamW wd=0, β=(0.5,0.999),
   fixed LR 3e-4, warmup_iters=1000, ema_decay=0.999, patience=8×eval_every,
-  early-stop metric=`gen_res`) unless training reveals a reason to change them.
+  **early-stop metric=`fm`** — corrected from an earlier `gen_res` note here,
+  which was a misreading of 2-D's actual default; `gen_res` is offered as an
+  option but `fm` is what 2-D actually defaults to and what 3-D now matches)
+  unless training reveals a reason to change them.
+- **EMA now uses 2-D's bias-corrected ramp** (`d = min(decay, (1+it)/(10+it))`)
+  instead of a fixed decay from step 0 — a fixed decay keeps ~37% of the random
+  init blended into the EMA at it=1000 (right when physics turns on), which let
+  a diverging live model look deceptively good in the "best" checkpoint during
+  the exact window that mattered. First real run (batch=6, pre-EMA-fix) showed
+  training-time residual loss improving steadily while `val_gen_res` (physics
+  residual of samples generated from pure noise, the actual deployment metric)
+  diverged catastrophically after ~2000 iters and samples mode-collapsed to one
+  planform — the EMA ramp plus switching early-stopping to `fm` (so a volatile
+  `val_gen_res` doesn't drive checkpoint selection/stopping) are the fixes
+  ported from 2-D to address this; re-running to confirm.
 - Filenames as proposed: `rb3d_pbfm_common.py`, `train_rb3d_pbfm_conditioned.py`,
   `ckpt_rb3d_pbfm_cond.pt`.
 
