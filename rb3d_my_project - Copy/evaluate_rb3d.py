@@ -42,8 +42,23 @@ USAGE
     python evaluate_rb3d.py \
         --splits ./datasets/rb3d_multisolution/splits \
         --cond-ckpt ckpt_rb3d_cond.pt --uncond-ckpt ckpt_rb3d_uncond.pt \
+        --pbfm-ckpt ckpt_rb3d_pbfm_cond.pt \
         --suite all --k-samples 24
     python evaluate_rb3d.py --suite gt --quick        # fast smoke
+
+PBFM (optional third column, --pbfm-ckpt): physics is enforced at TRAINING
+time via a residual loss (rb3d_pbfm_common.py), so there is no sampling-time
+projection to switch on for it -- per evaluation_and_paper_spec.md A.1/A.11,
+"vanilla and PBFM are sampled identically (no projection); they differ only in
+the trained checkpoint." It slots into the SAME cond/uncond model loop and the
+SAME draw_paired() infrastructure as vanilla/PCFM (draw_paired(pbfm=True) just
+skips the projection draw and mirrors the plain-flow result into both the
+van_* and pcfm_* record slots), so every existing metric/CSV/figure that reads
+those generic keys handles it with no special-casing. gt/metrics.csv also
+gains paper_table_a9.csv, the spec A.9 schema (model | method | rho(median) |
+rho/floor | valid% | coverage | H(nats) | NRMSE%) pooling all present models
+(cond-vanilla, cond-PCFM, uncond-PCFM, cond-PBFM) into the rows the paper
+table needs directly.
 """
 
 import argparse
@@ -52,7 +67,7 @@ import math
 import os
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import numpy as np
 import torch
@@ -243,6 +258,26 @@ def calibrate_thresholds(data, resid, mult=1.5, q=0.95):
     return thr, floor
 
 
+def median_floor_by_planform(data, resid):
+    """Per-planform MEDIAN residual (spec A.5's floor_n, distinct from the 1.5*q99
+    threshold above) from the training bank -- same convention as RB2D-PBFM-copy's
+    calibrate_thresholds (floor[n] = median). Used only for the A.9 'rho/floor'
+    reporting column; does not affect the pass/fail validity criterion, which
+    stays exactly as calibrated above (unchanged behaviour for existing callers).
+    NOTE (carried from rb3d_pbfm_spec.md): these references come from the same
+    training bank the residual evaluator partially shares discretisation with,
+    not a fully independent higher-fidelity solve per spec A.3 -- flagged there
+    as a follow-up sanity check, not blocking."""
+    per = defaultdict(list)
+    dev = getattr(resid, 'device', 'cpu')
+    sc = data.scale[:, None, None, None].to(dev)
+    for i, (Ra, Pr, mode) in enumerate(data.keys):
+        f = (data.fields[i].to(dev)) * sc
+        rm, rt, rc = resid(f, Ra, Pr)
+        per[tuple(mode)].append(max(rm, rt, rc))
+    return {mode: float(np.median(vals)) for mode, vals in per.items()}
+
+
 # ============================================================================
 #  Draw K relaxed samples at one (Ra,Pr) from a model
 # ============================================================================
@@ -255,10 +290,18 @@ def physics_L2(rm, rt, rc):
 
 
 def draw_paired(model, ck, data, projector, resid, Ra, Pr, k, n_step,
-                proj_start, batch, seed0, n_newton=1, floor=None):
+                proj_start, batch, seed0, n_newton=1, floor=None, pbfm=False):
     """Draw k samples and return, for each, BOTH the VANILLA (raw flow, no
     correction) field and the PCFM (projected) field. Same seed => same noise
     => a true paired ablation of the correction alone.
+
+    pbfm=True: this model's physics is enforced at TRAINING time (PBFM), so
+    there is nothing to project at sampling time -- per spec A.1/A.11, PBFM is
+    "sampled identically to vanilla (no projection)". Draw ONE plain-flow batch
+    and use it for both the van_* and pcfm_* slots, which lets every downstream
+    metric/CSV/figure that already reads those generic keys handle the PBFM row
+    with no further changes (van==pcfm for this row is the honest statement
+    "no projection ablation exists for this checkpoint").
 
     ADAPTIVE RE-PROJECTION: if `floor` is given, samples whose residual is
     still above it after the standard pass get ONE extra, longer final
@@ -277,10 +320,13 @@ def draw_paired(model, ck, data, projector, resid, Ra, Pr, k, n_step,
         f_van, d_van = pcfm_sample(model, ck, data, Ra_l, Pr_l, projector,
                                    n_step=n_step, seed=seed0 + done,
                                    vanilla=True)
-        f_pcf, d_pcf = pcfm_sample(model, ck, data, Ra_l, Pr_l, projector,
-                                   n_step=n_step, proj_start=proj_start,
-                                   n_newton=n_newton, seed=seed0 + done)
-        if floor is not None:
+        if pbfm:
+            f_pcf, d_pcf = f_van, d_van          # no projection step to draw
+        else:
+            f_pcf, d_pcf = pcfm_sample(model, ck, data, Ra_l, Pr_l, projector,
+                                       n_step=n_step, proj_start=proj_start,
+                                       n_newton=n_newton, seed=seed0 + done)
+        if floor is not None and not pbfm:
             retry = [j for j in range(b)
                      if max(resid(f_pcf[j], Ra, Pr)[:2]) > floor]
             if retry:
@@ -327,7 +373,8 @@ def _classify1(field, aspect):
 #  SUITE: Test-GT / Test-drift (reference-based)
 # ============================================================================
 def run_reference_suite(models, data, projector, resid, thresholds, floor,
-                        bank, args, outdir, drift=False):
+                        bank, args, outdir, drift=False,
+                        floor_by_pf=None, n_branches=None):
     os.makedirs(outdir, exist_ok=True)
     # group references by (Ra,Pr) -> {planform: field}
     refs_by_pt = defaultdict(dict)
@@ -364,7 +411,7 @@ def run_reference_suite(models, data, projector, resid, thresholds, floor,
             samples = draw_paired(model, ck, data, projector, resid, Ra, Pr,
                                   args.k_samples, args.n_step, args.proj_start,
                                   args.batch, 1000 * pi, args.n_newton,
-                                  floor=floor)
+                                  floor=floor, pbfm=(mname == 'pbfm'))
             for s in samples:
                 rec = dict(Ra=Ra, Pr=Pr, relax=s['relax'])
                 for variant in ('van', 'pcfm'):
@@ -376,6 +423,7 @@ def run_reference_suite(models, data, projector, resid, thresholds, floor,
                     rec[variant + '_mom'] = rm
                     rec[variant + '_temp'] = rt
                     rec[variant + '_cont'] = rc
+                    rec[variant + '_rho'] = max(rm, rt, rc)   # spec A.4: worst-of-eqns
                     rec[variant + '_valid'] = bool(max(rm, rt) < thr)
                     rec[variant + '_nrmse'] = float('nan')
                     # NRMSE to SAME-planform ref (strict) AND to BEST-matching
@@ -413,8 +461,66 @@ def run_reference_suite(models, data, projector, resid, thresholds, floor,
     _fig_physL2(records, outdir, tag)
     if not drift:
         _fig_nrmse_by_branch(records, data, outdir)
+    if floor_by_pf is not None and n_branches:
+        write_a9_table(records, floor_by_pf, n_branches, outdir, tag,
+                       with_nrmse=True)
     _ckpt_clear(outdir, tag)          # suite finished cleanly -- drop the log
     return records
+
+
+def write_a9_table(records, floor_by_pf, n_branches, outdir, tag,
+                   with_nrmse=True):
+    """evaluation_and_paper_spec.md A.9: one row per (model, method) with the
+    columns the paper table needs directly:
+        model | method(vanilla/PBFM/PCFM) | rho(median) | rho/floor |
+        valid% | coverage | H(nats) | NRMSE%
+    'model' here is the cond/uncond checkpoint tag (records key); PBFM's
+    van_*==pcfm_* by construction (draw_paired(pbfm=True)), so it naturally
+    contributes exactly one method row instead of a vanilla/PCFM pair."""
+    rows = []
+    for m, recs in records.items():
+        if not recs:
+            continue
+        is_pbfm = (m == 'pbfm')
+        variants = [('van', 'PBFM' if is_pbfm else 'vanilla')]
+        if not is_pbfm:
+            variants.append(('pcfm', 'PCFM'))
+        for variant, method in variants:
+            rhos = [r[variant + '_rho'] for r in recs if variant + '_rho' in r]
+            valid = [r[variant + '_valid'] for r in recs]
+            ratios = [r[variant + '_rho'] / max(floor_by_pf.get(r[variant + '_pf'], 1e-9), 1e-9)
+                      for r in recs if variant + '_rho' in r]
+            valid_pfs = [r[variant + '_pf'] for r in recs if r[variant + '_valid']]
+            cnt = Counter(valid_pfs)
+            tot = sum(cnt.values())
+            ent = -sum((c / tot) * math.log(c / tot) for c in cnt.values()) if tot else 0.0
+            nrmse_pct = float('nan')
+            if with_nrmse:
+                key = variant + '_nrmse'
+                nvals = [r[key] for r in recs if key in r and not math.isnan(r[key])]
+                if nvals:
+                    nrmse_pct = 100 * float(np.mean(nvals))
+            rows.append(dict(
+                model=m, method=method,
+                rho_median=float(np.median(rhos)) if rhos else float('nan'),
+                rho_over_floor=float(np.median(ratios)) if ratios else float('nan'),
+                valid_pct=100 * float(np.mean(valid)) if valid else float('nan'),
+                coverage=len(set(valid_pfs)) / n_branches if n_branches else float('nan'),
+                entropy_nats=round(ent, 4),
+                nrmse_pct=round(nrmse_pct, 3) if nrmse_pct == nrmse_pct else nrmse_pct))
+    if not rows:
+        return rows
+    path = os.path.join(outdir, 'paper_table_a9.csv')
+    hdr = ['model', 'method', 'rho_median', 'rho_over_floor', 'valid_pct',
+          'coverage', 'entropy_nats', 'nrmse_pct']
+    with open(path, 'w') as fh:
+        fh.write(','.join(hdr) + '\n')
+        for r in rows:
+            fh.write(','.join(str(round(r[k], 4)) if isinstance(r[k], float) else str(r[k])
+                              for k in hdr) + '\n')
+    print(f'  [{tag}] wrote {path} (spec A.9 schema, max H = ln({n_branches}) '
+          f'= {math.log(n_branches):.4f} nats)')
+    return rows
 
 
 def _write_reference_metrics(records, data, outdir, tag):
@@ -466,7 +572,7 @@ def _write_reference_metrics(records, data, outdir, tag):
 #  SUITE: Test-heldout (no reference -> physics + coverage only)
 # ============================================================================
 def run_heldout_suite(models, data, projector, resid, thresholds, floor,
-                      bank, args, outdir):
+                      bank, args, outdir, floor_by_pf=None, n_branches=None):
     os.makedirs(outdir, exist_ok=True)
     points = sorted({(k[0], k[1]) for k in bank['entries']})
     if args.max_heldout_points:
@@ -488,7 +594,7 @@ def run_heldout_suite(models, data, projector, resid, thresholds, floor,
             samples = draw_paired(model, ck, data, projector, resid, Ra, Pr,
                                   args.k_samples, args.n_step, args.proj_start,
                                   args.batch, 7000 * pi, args.n_newton,
-                                  floor=floor)
+                                  floor=floor, pbfm=(mname == 'pbfm'))
             new_recs = []
             for s in samples:
                 rec = dict(Ra=Ra, Pr=Pr, relax=s['relax'])
@@ -498,6 +604,7 @@ def run_heldout_suite(models, data, projector, resid, thresholds, floor,
                     thr = thresholds.get(pf, floor)
                     rec[variant + '_pf'] = pf
                     rec[variant + '_physL2'] = physics_L2(rm, rt, rc)
+                    rec[variant + '_rho'] = max(rm, rt, rc)
                     rec[variant + '_valid'] = bool(max(rm, rt) < thr)
                     if variant == 'pcfm' and rec['pcfm_valid']:
                         coverage[mname][pf] += 1
@@ -530,6 +637,9 @@ def run_heldout_suite(models, data, projector, resid, thresholds, floor,
     _fig_heldout_coverage(coverage, data, outdir)
     _fig_residual_hist(records, outdir)
     _fig_physL2(records, outdir, 'heldout')
+    if floor_by_pf is not None and n_branches:
+        write_a9_table(records, floor_by_pf, n_branches, outdir, 'heldout',
+                       with_nrmse=False)     # heldout has no GT -> no NRMSE
     _ckpt_clear(outdir, 'heldout')    # suite finished cleanly -- drop the log
     return records
 
@@ -575,7 +685,8 @@ def run_resolution_suite(models, data, resid_cache, res_bank, args, outdir):
             for pi, (Ra, Pr) in enumerate(sorted(refs[f])):
                 samples = draw_paired(model, ck, dview, rproj, rr, Ra, Pr,
                                       args.k_res, args.n_step, args.proj_start,
-                                      args.batch, 50 * pi, args.n_newton)
+                                      args.batch, 50 * pi, args.n_newton,
+                                      pbfm=(mname == 'pbfm'))
                 rf = refs[f][(Ra, Pr)]
                 for s in samples:
                     pf = s['pcfm_pf']
@@ -766,6 +877,9 @@ def parse_args():
                    default='./datasets/rb3d_multisolution/splits')
     p.add_argument('--cond-ckpt', default='ckpt_rb3d_cond.pt')
     p.add_argument('--uncond-ckpt', default='ckpt_rb3d_uncond.pt')
+    p.add_argument('--pbfm-ckpt', dest='pbfm_ckpt', default='ckpt_rb3d_pbfm_cond.pt',
+                   help='conditioned PBFM checkpoint (optional third column; '
+                        'skipped with a warning if not found)')
     p.add_argument('--out', default='rb3d_eval')
     p.add_argument('--device', default=None,
                    help='cpu | cuda | cuda:0 ... (default: cuda if available)')
@@ -840,6 +954,7 @@ def _run_dual_gpu(args):
     base = [sys.executable, os.path.abspath(__file__),
             '--splits', args.splits, '--out', args.out,
             '--cond-ckpt', args.cond_ckpt, '--uncond-ckpt', args.uncond_ckpt,
+            '--pbfm-ckpt', args.pbfm_ckpt,
             '--k-samples', str(args.k_samples), '--k-res', str(args.k_res),
             '--batch', str(args.batch), '--n-step', str(args.n_step),
             '--projector', args.projector,
@@ -905,11 +1020,13 @@ def main():
     resid_cache = {(data.Nx, data.Ny, data.Nz): resid}
 
     models = {}
-    for tag, path in (('cond', args.cond_ckpt), ('uncond', args.uncond_ckpt)):
+    for tag, path in (('cond', args.cond_ckpt), ('uncond', args.uncond_ckpt),
+                      ('pbfm', args.pbfm_ckpt)):
         if os.path.exists(path):
             models[tag] = load_flow_model(path, device)
         else:
-            print(f'[warn] {tag} checkpoint {path} not found -- skipping')
+            print(f'[warn] {tag} checkpoint {path} not found -- skipping'
+                  f'{" (PBFM column omitted)" if tag == "pbfm" else ""}')
     assert models, 'no checkpoints found'
 
     print('[eval] calibrating validity thresholds on the training bank ...')
@@ -917,6 +1034,12 @@ def main():
                                              mult=args.cal_mult, q=args.cal_q)
     print(f'[eval] thresholds (per planform): '
           f'{ {str(k): round(v,3) for k,v in thresholds.items()} } floor={floor:.3f}')
+    # A.9 table needs the per-branch MEDIAN residual (floor_n), distinct from
+    # the 1.5*q99 threshold above -- see median_floor_by_planform's docstring.
+    floor_by_pf = median_floor_by_planform(data, resid)
+    n_branches = len({tuple(k[2]) for k in data.keys})
+    print(f'[eval] {n_branches} distinct trained planform(s) in the bank '
+          f'(A.9 coverage/entropy denominator)')
 
     summary = {}
     def load(name):
@@ -926,7 +1049,8 @@ def main():
     if args.suite in ('all', 'gt'):
         rec = run_reference_suite(models, data, projector, resid, thresholds,
                                   floor, load('test_gt_bank.pt'), args,
-                                  os.path.join(args.out, 'gt'), drift=False)
+                                  os.path.join(args.out, 'gt'), drift=False,
+                                  floor_by_pf=floor_by_pf, n_branches=n_branches)
         summary['gt'] = {m: dict(
             van_physL2=float(np.mean([r['van_physL2'] for r in rec[m]])),
             pcfm_physL2=float(np.mean([r['pcfm_physL2'] for r in rec[m]])),
@@ -948,7 +1072,8 @@ def main():
     if args.suite in ('all', 'heldout'):
         rec = run_heldout_suite(models, data, projector, resid, thresholds,
                                 floor, load('test_heldout_bank.pt'), args,
-                                os.path.join(args.out, 'heldout'))
+                                os.path.join(args.out, 'heldout'),
+                                floor_by_pf=floor_by_pf, n_branches=n_branches)
         summary['heldout'] = {m: dict(
             van_physL2=float(np.mean([r['van_physL2'] for r in rec[m]])),
             pcfm_physL2=float(np.mean([r['pcfm_physL2'] for r in rec[m]])),
