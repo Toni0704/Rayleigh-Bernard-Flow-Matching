@@ -194,17 +194,36 @@ def config_direction(g_fm, g_r, eps=1e-12):
 def default_cfg_pbfm():
     """PCFM's default_cfg() layered with PBFM-specific keys. lr/optimizer
     settings follow the PBFM paper's Appendix G (fixed LR, beta1=0.5, wd=0),
-    same as RB2D-PBFM-copy's defaults."""
+    same as RB2D-PBFM-copy's defaults.
+
+    warmup_iters/unroll_start/min_iters were tightened after a real run
+    early-stopped at it~5-6k of a 30000-iter budget (patience=8 at
+    val_every=500 = only 4000 iters of tolerance, burned through by normal
+    fm-loss noise right as physics turned on) and the resulting checkpoint's
+    plain-ODE samples diverged catastrophically (rho ~1e17: a genuinely
+    undertrained 3-D flow field cannot integrate a clean 50-step trajectory
+    from pure noise). Three changes address this together:
+      - warmup_iters 1000->3000: 3-D's primitive-variable field is a much
+        harder object to get to a stable FM prior than 2-D's streamfunction,
+        so the residual loss now starts perturbing a more competent baseline.
+      - unroll_start=1 (curriculum enabled, was None/disabled): ramps
+        unroll 1->`unroll` instead of jumping straight to it the instant
+        physics turns on, matching 2-D's actual (not just documented)
+        practice -- softens exactly the transition that caused instability.
+      - min_iters: an absolute floor below which early stopping cannot fire
+        REGARDLESS of patience -- insurance against the same noisy-plateau
+        premature stop recurring even with a looser --patience.
+    """
     from rb3d_pcfm_common import default_cfg
     cfg = default_cfg()
     cfg.update(
         lr=3e-4, wd=0.0, adam_b1=0.5, adam_b2=0.999, lr_schedule='constant',
-        unroll=2, unroll_start=None, curriculum_end=None, backprop='last',
-        resid_p=1.0, use_config=True, resid_weight=1.0, warmup_iters=1000,
+        unroll=2, unroll_start=1, curriculum_end=None, backprop='last',
+        resid_p=1.0, use_config=True, resid_weight=1.0, warmup_iters=3000,
         grad_clip=1.0, physics=True,
         early_stop_metric='fm',             # 'fm' (2-D default) or 'gen_res'
         val_gen_samples=8, val_gen_steps=25, val_resid_samples=16,
-        val_every=500, patience=8,
+        val_every=500, patience=8, min_iters=None,   # None -> 0.4 * iters
     )
     return cfg
 
@@ -315,6 +334,18 @@ def train_pbfm_3d(data, cfg, cond, device, ckpt_path, eval_every=500,
         print(f'[train] NOTE: global batch {global_batch} not divisible by '
               f'{world_size} GPUs; rounding down.')
     batch = max(1, global_batch // world_size)
+
+    # Absolute floor below which early stopping cannot fire, regardless of
+    # `patience` -- insurance against a noisy post-warmup plateau (fm loss is
+    # volatile right as physics turns on) triggering a premature stop that
+    # leaves the checkpoint too undertrained to integrate a stable ODE
+    # trajectory from pure noise at sampling time. See default_cfg_pbfm().
+    min_iters = cfg.get('min_iters')
+    if min_iters is None:
+        min_iters = int(0.4 * cfg['iters'])
+    if main:
+        print(f'[train] early stopping disabled before it={min_iters} '
+              f'(min_iters, patience={cfg["patience"]})')
 
     model = FNO3d(cfg, cond=cond, Nz=data.Nz).to(dev)
     n_par = sum(p.numel() for p in model.parameters())
@@ -593,7 +624,7 @@ def train_pbfm_3d(data, cfg, cond, device, ckpt_path, eval_every=500,
                 print(f'  [ckpt] it {it+1} metric({cfg["early_stop_metric"]})='
                       f'{metric:.4e} {"saved-best" if improved else f"(bad {bad}/{patience})"} '
                       f'[last saved]', flush=True)
-                stop = patience > 0 and bad >= patience
+                stop = patience > 0 and bad >= patience and (it + 1) >= min_iters
             stop = ddp_broadcast_flag(stop, src=0, device=dev)
             if stop:
                 if main:

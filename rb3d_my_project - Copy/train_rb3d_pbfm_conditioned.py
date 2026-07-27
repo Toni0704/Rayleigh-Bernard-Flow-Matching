@@ -78,9 +78,14 @@ def parse_args():
                    help='PBFM unrolling steps used to predict x~1. Start small '
                         '(default 2) -- the 3-D Leray-projected residual is far '
                         'costlier per call than 2-D\'s Poisson solve.')
-    p.add_argument('--unroll-start', dest='unroll_start', type=int, default=None,
-                   help='curriculum start; None/>=--unroll disables the curriculum')
-    p.add_argument('--curriculum-end', dest='curriculum_end', type=int, default=None)
+    p.add_argument('--unroll-start', dest='unroll_start', type=int,
+                   default=cfg['unroll_start'],
+                   help='curriculum start; None/>=--unroll disables the curriculum '
+                        '(default: ramp from 1, matching 2-D\'s actual practice)')
+    p.add_argument('--curriculum-end', dest='curriculum_end', type=int,
+                   default=cfg['curriculum_end'],
+                   help='iteration the curriculum reaches --unroll (default: '
+                        'half of --iters)')
     p.add_argument('--lr-schedule', dest='lr_schedule', default=cfg['lr_schedule'],
                    choices=['constant', 'cosine'])
     p.add_argument('--adam-b1', dest='adam_b1', type=float, default=cfg['adam_b1'])
@@ -100,6 +105,10 @@ def parse_args():
     p.add_argument('--patience', type=int, default=cfg['patience'],
                    help='stop after this many consecutive evals without '
                         'improvement. 0 disables early stopping.')
+    p.add_argument('--min-iters', dest='min_iters', type=int,
+                   default=cfg['min_iters'],
+                   help='early stopping cannot fire before this iteration '
+                        'regardless of --patience (default: 0.4 * --iters)')
     p.add_argument('--early-stop-metric', dest='early_stop_metric',
                    default=cfg['early_stop_metric'], choices=['fm', 'gen_res'])
     p.add_argument('--val-gen-samples', dest='val_gen_samples', type=int,
@@ -166,6 +175,7 @@ def worker(rank, world_size, args, data=None):
             resid_weight=args.resid_weight, warmup_iters=args.warmup_iters,
             ema=args.ema, grad_clip=args.grad_clip, val_frac=args.val_frac,
             val_every=args.val_every, patience=args.patience,
+            min_iters=args.min_iters,
             early_stop_metric=args.early_stop_metric,
             val_gen_samples=args.val_gen_samples, log_every=args.log_every,
             seed=args.seed, augment=args.augment, physics=args.physics)

@@ -33,9 +33,27 @@ revisit any of these anytime by editing this file):
   diverged catastrophically after ~2000 iters and samples mode-collapsed to one
   planform — the EMA ramp plus switching early-stopping to `fm` (so a volatile
   `val_gen_res` doesn't drive checkpoint selection/stopping) are the fixes
-  ported from 2-D to address this; re-running to confirm.
+  ported from 2-D to address this. That fixed checkpoint SELECTION but not the
+  underlying problem: the next real run early-stopped at it~5-6k of the 30000
+  budget (`patience=8` at `val_every=500` = only 4000 iters of tolerance,
+  burned through by ordinary post-warmup fm-loss noise), and the resulting
+  severely-undertrained checkpoint's plain-ODE samples diverged to rho~1e17 at
+  eval time (`evaluate_rb3d_pbfm.py`) -- a genuine numerical blow-up integrating
+  50 Euler steps from pure noise on a flow field that never had time to
+  stabilize, not a scoring bug. Three more changes target this specifically:
+  **`warmup_iters` 1000->3000** (3-D's primitive-variable field needs longer to
+  reach a stable FM prior than 2-D's streamfunction before physics starts
+  perturbing it), **`unroll_start=1`** (curriculum now ON by default, ramping
+  1->`unroll` instead of jumping straight to it -- matches 2-D's actual
+  practice; the CLI flags for this existed but had a hardcoded `default=None`
+  bug bypassing cfg's value, now fixed), and a new **`min_iters`** floor
+  (default `0.4 * iters`) below which early stopping cannot fire at all
+  regardless of `--patience` -- insurance against the same noisy-plateau
+  premature stop recurring. Re-running with `--patience 40` (was 8) on top of
+  these to confirm.
 - Filenames as proposed: `rb3d_pbfm_common.py`, `train_rb3d_pbfm_conditioned.py`,
-  `ckpt_rb3d_pbfm_cond.pt`.
+  `ckpt_rb3d_pbfm_cond.pt`. Standalone evaluator: `evaluate_rb3d_pbfm.py`
+  (PBFM-only, per spec A.9 schema; no dependency on PCFM/vanilla checkpoints).
 
 ## Steps
 
