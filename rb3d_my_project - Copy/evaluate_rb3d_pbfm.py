@@ -440,11 +440,24 @@ def main():
     # hitting that peak simultaneously under mp.spawn is exactly what SIGKILLed
     # a 31GB-RAM box during PBFM training (see rb3d_pbfm_action_plan.md); an
     # eval run with --gpus>1 would hit the identical ceiling without this.
+    #
+    # ONLY do this when mp.spawn will actually be used (gpus>1): share_memory_()
+    # allocates a NEW /dev/shm-backed copy of each tensor (transiently ~2x, so
+    # ~17GB here) with no benefit in the single-process (--gpus 1) path, and
+    # /dev/shm is a small, fixed-size tmpfs (14GB seen on this box) shared with
+    # whatever else is using it -- e.g. a concurrently-running training job
+    # that already claimed its own ~8.6GB there via the identical mechanism.
+    gpus_resolved = args.gpus
+    if gpus_resolved is None:
+        gpus_resolved = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    gpus_resolved = max(1, int(gpus_resolved))
+
     data = RB3DData(os.path.join(args.splits, 'train_bank.pt'), device='cpu')
-    data.fields.share_memory_()
-    data.params.share_memory_()
-    data.Ra.share_memory_()
-    data.Pr.share_memory_()
+    if gpus_resolved > 1:
+        data.fields.share_memory_()
+        data.params.share_memory_()
+        data.Ra.share_memory_()
+        data.Pr.share_memory_()
     resid = Residual(data.Nx, data.Ny, data.Nz, data.aspect)
     n_branches = len({tuple(k[2]) for k in data.keys})
     _data_cache['data'] = data
