@@ -177,6 +177,15 @@ def worker_reference(rank, world_size, args, tag, bank_name, data):
                 ga, _ = align_to(s['field'], rr[s['pf']])
                 _, nr = data_errors(ga, rr[s['pf']])
                 rec['nrmse'] = nr
+            # best-over-references NRMSE, regardless of classification --
+            # matches evaluate_rb3d.py's 'nrmse_best' convention. Needed
+            # because PBFM samples that fail the purity gate classify as
+            # ('unknown',0,0), which never matches a real planform key above,
+            # leaving 'nrmse' permanently NaN for every low-quality sample;
+            # this fallback is what lets a PBFM row report a real NRMSE% at
+            # low validity, exactly like the paper table's other PDE rows do.
+            rec['nrmse_best'] = (min(data_errors(align_to(s['field'], r)[0], r)[1]
+                                     for r in rr.values()) if rr else float('nan'))
             recs.append(rec)
         _ckpt_append(args.out_dir, tag, 'pbfm', Ra, Pr, recs)
         part += recs
@@ -262,6 +271,7 @@ def merge_and_report(args, tag, n_branches, with_nrmse):
 
     def _line(label, sub):
         nv = [r['nrmse'] for r in sub if not math.isnan(r.get('nrmse', float('nan')))]
+        nb = [r['nrmse_best'] for r in sub if not math.isnan(r.get('nrmse_best', float('nan')))]
         return dict(planform=label, n=len(sub),
                    physL2=round(float(np.mean([r['physL2'] for r in sub])), 4),
                    rho_median=round(float(np.median([r['rho'] for r in sub])), 4),
@@ -269,12 +279,16 @@ def merge_and_report(args, tag, n_branches, with_nrmse):
                    mom=round(float(np.mean([r['mom'] for r in sub])), 4),
                    temp=round(float(np.mean([r['temp'] for r in sub])), 4),
                    cont=round(float(np.mean([r['cont'] for r in sub])), 4),
-                   nrmse_pct=(round(100 * float(np.mean(nv)), 2) if nv else float('nan')))
+                   nrmse_pct=(round(100 * float(np.mean(nv)), 2) if nv else float('nan')),
+                   # best-over-references NRMSE, regardless of classification
+                   # (see worker_reference's comment) -- this is what stays
+                   # meaningful when every sample fails the purity gate.
+                   nrmse_best_pct=(round(100 * float(np.mean(nb)), 2) if nb else float('nan')))
 
     rows = [_line(str(pf), sub) for pf, sub in sorted(by_pf.items())]
     rows.append(_line('AVG', records))
     hdr = ['planform', 'n', 'physL2', 'rho_median', 'valid_pct', 'mom', 'temp',
-          'cont', 'nrmse_pct']
+          'cont', 'nrmse_pct', 'nrmse_best_pct']
     with open(os.path.join(outdir, 'metrics.csv'), 'w') as fh:
         fh.write(','.join(hdr) + '\n')
         for row in rows:
@@ -295,9 +309,16 @@ def merge_and_report(args, tag, n_branches, with_nrmse):
     cnt = Counter(valid_pfs)
     tot = sum(cnt.values())
     ent = -sum((c / tot) * math.log(c / tot) for c in cnt.values()) if tot else 0.0
+    # spec's paper table reports NRMSE% even for methods at 0% validity (e.g.
+    # Bratu2D/AC's PBFM rows), which requires the best-over-references match
+    # rather than the strict same-planform one -- classify_purity assigns
+    # ('unknown',0,0) to any sample that fails the purity gate, and that never
+    # equals a real bank planform, so the strict 'nrmse' column is NaN for
+    # exactly the low-validity regime this row lives in.
     nrmse_pct = float('nan')
     if with_nrmse:
-        nv = [r['nrmse'] for r in records if not math.isnan(r.get('nrmse', float('nan')))]
+        nv = [r['nrmse_best'] for r in records
+             if not math.isnan(r.get('nrmse_best', float('nan')))]
         if nv:
             nrmse_pct = 100 * float(np.mean(nv))
     a9 = dict(model='cond', method='PBFM',
